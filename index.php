@@ -1,152 +1,249 @@
 <?php
-// 保持PHP逻辑不变（同改进版代码）
-// 主要优化HTML和CSS部分
+$mirrorContent = '';
+$errorMessage = '';
+$inputUrl = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $inputUrl = trim($_POST['url']);
+    $urlInfo = parse_url($inputUrl);
+
+    // 1. URL格式验证
+    if (!isset($urlInfo['scheme']) || !in_array($urlInfo['scheme'], ['http', 'https'])) {
+        $errorMessage = '请输入有效的HTTP/HTTPS网址（例如：https://example.com）';
+    } else {
+        // 2. cURL获取远程内容
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $inputUrl,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_TIMEOUT => 20, // 适应移动端网络延迟
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1', // 移动端UA
+            CURLOPT_SSL_VERIFYPEER => false, // 生产环境需启用验证
+            CURLOPT_SSL_VERIFYHOST => false
+        ]);
+
+        $content = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($content === false || $httpCode >= 400) {
+            $errorMessage = "获取内容失败（状态码：{$httpCode}）";
+        } else {
+            // 3. 字符编码转换（解决乱码）
+            $encoding = 'UTF-8';
+            if (preg_match('/charset=([a-zA-Z0-9\-]+)/i', $content, $match)) {
+                $encoding = strtoupper($match[1]);
+            }
+            $content = mb_convert_encoding($content, 'HTML-ENTITIES', $encoding);
+            $content = mb_convert_encoding($content, 'UTF-8', 'HTML-ENTITIES');
+
+            // 4. 构建基础URL（包含路径）
+            $baseUrl = $urlInfo['scheme'] . '://' . $urlInfo['host'];
+            if (isset($urlInfo['port'])) $baseUrl .= ':' . $urlInfo['port'];
+            $basePath = isset($urlInfo['path']) ? dirname($urlInfo['path']) . '/' : '/';
+            $baseUrl .= rtrim($basePath, '/') . '/';
+
+            // 5. 解析HTML并修复资源路径
+            $dom = new DOMDocument();
+            libxml_use_internal_errors(true); // 抑制解析警告
+            $dom->loadHTML($content);
+            libxml_clear_errors();
+
+            $xpath = new DOMXPath($dom);
+            $elements = [
+                ['tag' => 'a', 'attr' => 'href'],
+                ['tag' => 'img', 'attr' => 'src'],
+                ['tag' => 'link', 'attr' => 'href'],
+                ['tag' => 'script', 'attr' => 'src'],
+                ['tag' => 'iframe', 'attr' => 'src'],
+                ['tag' => 'form', 'attr' => 'action'],
+                ['tag' => 'img', 'attr' => 'srcset'], // 响应式图片
+                ['tag' => 'source', 'attr' => 'src'], // 多媒体资源
+            ];
+
+            foreach ($elements as $el) {
+                $nodes = $xpath->query("//{$el['tag']}[@{$el['attr']}]");
+                foreach ($nodes as $node) {
+                    $attr = $node->getAttribute($el['attr']);
+                    if (empty($attr) || strpos($attr, '://') !== false || $attr[0] === '#') continue;
+                    $absUrl = $baseUrl . ltrim($attr, '/');
+                    $node->setAttribute($el['attr'], $absUrl);
+                }
+            }
+
+            $mirrorContent = $dom->saveHTML();
+        }
+    }
+}
+
+// URL处理辅助类
+class Uri {
+    private $url;
+    public function __construct($url) {
+        $this->url = filter_var($url, FILTER_SANITIZE_URL);
+    }
+    public function getUrl() {
+        return $this->url;
+    }
+}
 ?>
 
 <!DOCTYPE html>
 <html>
 <head>
-    <title>网址镜像工具</title>
+    <title>全能网页镜像工具</title>
+    <!-- 移动端核心适配 -->
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"> <!-- 移动端适配关键 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#1a73e8">
+
     <style>
-        /* 基础样式 */
+        /* 全局样式 */
         * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
             margin: 0;
             padding: 0;
-            box-sizing: border-box;
-            -webkit-tap-highlight-color: transparent; /* 消除点击高亮 */
         }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
-            line-height: 1.6;
             background-color: #f5f5f5;
-            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
 
         .container {
-            max-width: 600px; /* 限制最大宽度，避免大屏拉伸 */
+            max-width: 640px;
             margin: 0 auto;
+            padding: 20px;
+            flex: 1;
         }
 
-        h1 {
-            font-size: 24px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-
-        /* 表单样式（移动端友好） */
-        .form-group {
-            margin-bottom: 15px;
+        /* 表单区域 */
+        .form-box {
+            background: white;
+            padding: 24px;
+            border-radius: 16px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
         }
 
         input[type="url"] {
             width: 100%;
-            padding: 12px;
+            padding: 16px;
             font-size: 16px;
             border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            background-color: white;
+            border-radius: 12px;
+            margin-bottom: 20px;
         }
 
         button {
             width: 100%;
-            padding: 14px;
+            padding: 18px;
             font-size: 18px;
-            background-color: #2196F3;
+            background-color: #1a73e8;
             color: white;
             border: none;
-            border-radius: 8px;
+            border-radius: 12px;
             cursor: pointer;
-            transition: background-color 0.3s;
+            transition: transform 0.2s ease;
         }
 
         button:hover {
-            background-color: #1976D2;
+            transform: scale(1.02);
         }
 
         .error {
-            color: #ff4444;
-            margin: 10px 0 20px;
-            font-size: 16px;
+            color: #dc2626;
+            margin-top: 15px;
+            font-size: 15px;
             line-height: 1.4;
         }
 
-        /* 镜像内容容器（核心适配部分） */
-        .mirror-container {
-            margin-top: 30px;
-            background-color: white;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        /* 镜像内容区域 */
+        .mirror-wrap {
+            flex: 1;
+            background: white;
+            padding: 24px;
+            border-radius: 16px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+            overflow-x: auto;
         }
 
-        /* 强制镜像内容适配手机屏幕 */
-        .mirror-container * {
-            max-width: 100% !important; /* 防止图片/视频溢出 */
+        .mirror-title {
+            font-size: 20px;
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        /* 内容适配规则 */
+        .mirror-content * {
+            max-width: 100% !important;
             height: auto !important;
+            word-wrap: break-word !important;
             box-sizing: border-box !important;
-            word-wrap: break-word !important; /* 长单词自动换行 */
+            display: block !important;
+            margin: 10px auto !important;
         }
 
-        .mirror-container img,
-        .mirror-container video,
-        .mirror-container iframe {
-            display: block;
-            margin: 15px 0;
-            border-radius: 8px;
-            max-height: 60vh; /* 限制最大高度，避免长视频撑大页面 */
-            object-fit: contain; /* 保持比例 */
+        .mirror-content img,
+        .mirror-content video,
+        .mirror-content iframe {
+            border-radius: 12px;
+            max-height: 80vh;
+            object-fit: contain;
         }
 
-        /* 链接和按钮触摸优化 */
-        .mirror-container a,
-        .mirror-container button {
-            min-width: 44px;
-            min-height: 44px; /* 符合iOS人机交互规范 */
-            padding: 12px;
-        }
-
-        /* 媒体查询（进一步优化小屏幕） */
+        /* 移动端专属优化 */
         @media (max-width: 480px) {
-            h1 {
-                font-size: 20px;
-            }
-
-            .mirror-container {
+            .container {
                 padding: 15px;
             }
-
-            .mirror-container h2 {
-                font-size: 18px;
-                margin-bottom: 15px;
+            
+            input[type="url"], button {
+                font-size: 14px;
+                padding: 14px;
             }
+            
+            .mirror-wrap {
+                padding: 18px;
+                border-radius: 10px;
+            }
+        }
+
+        /* 暗黑模式适配 */
+        @media (prefers-color-scheme: dark) {
+            body { background-color: #1a1a1a; color: white; }
+            .form-box, .mirror-wrap { background-color: #333; border-color: #444; }
+            button { background-color: #3b82f6; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>网址镜像工具</h1>
-        
-        <form method="post">
-            <div class="form-group">
+        <div class="form-box">
+            <form method="post">
                 <input type="url" name="url" 
-                       placeholder="请输入网址（例如：https://example.com）" 
+                       placeholder="请输入完整网址（例如：https://www.baidu.com）" 
                        value="<?= htmlspecialchars($inputUrl) ?>" 
                        required>
-            </div>
-            <button type="submit">开始镜像</button>
-        </form>
+                <button type="submit">开始镜像网页</button>
+            </form>
 
-        <?php if ($errorMessage): ?>
-            <div class="error"><?= $errorMessage ?></div>
-        <?php endif; ?>
+            <?php if ($errorMessage): ?>
+                <div class="error"><?= $errorMessage ?></div>
+            <?php endif; ?>
+        </div>
 
         <?php if ($mirrorContent): ?>
-            <div class="mirror-container">
-                <h2>镜像内容</h2>
-                <?= $mirrorContent ?>
+            <div class="mirror-wrap">
+                <h2 class="mirror-title">镜像网页内容</h2>
+                <div class="mirror-content"><?= $mirrorContent ?></div>
             </div>
         <?php endif; ?>
     </div>
