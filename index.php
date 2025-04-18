@@ -2,25 +2,26 @@
 $mirrorContent = '';
 $errorMessage = '';
 $inputUrl = '';
+$isLoading = false; // 新增变量，用于标记是否正在加载
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $inputUrl = trim($_POST['url']);
     $urlInfo = parse_url($inputUrl);
 
-    // 1. URL格式验证
+    // URL格式验证
     if (!isset($urlInfo['scheme']) || !in_array($urlInfo['scheme'], ['http', 'https'])) {
         $errorMessage = '请输入有效的HTTP/HTTPS网址（例如：https://example.com）';
     } else {
-        // 2. cURL获取远程内容
+        // cURL配置
         $ch = curl_init();
         curl_setopt_array($ch, [
             CURLOPT_URL => $inputUrl,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_MAXREDIRS => 5,
-            CURLOPT_TIMEOUT => 20, // 适应移动端网络延迟
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1', // 移动端UA
-            CURLOPT_SSL_VERIFYPEER => false, // 生产环境需启用验证
+            CURLOPT_TIMEOUT => 20,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1',
+            CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_SSL_VERIFYHOST => false
         ]);
 
@@ -31,7 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($content === false || $httpCode >= 400) {
             $errorMessage = "获取内容失败（状态码：{$httpCode}）";
         } else {
-            // 3. 字符编码转换（解决乱码）
+            // 字符编码转换
             $encoding = 'UTF-8';
             if (preg_match('/charset=([a-zA-Z0-9\-]+)/i', $content, $match)) {
                 $encoding = strtoupper($match[1]);
@@ -39,15 +40,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $content = mb_convert_encoding($content, 'HTML-ENTITIES', $encoding);
             $content = mb_convert_encoding($content, 'UTF-8', 'HTML-ENTITIES');
 
-            // 4. 构建基础URL（包含路径）
+            // 构建基础URL
             $baseUrl = $urlInfo['scheme'] . '://' . $urlInfo['host'];
             if (isset($urlInfo['port'])) $baseUrl .= ':' . $urlInfo['port'];
             $basePath = isset($urlInfo['path']) ? dirname($urlInfo['path']) . '/' : '/';
             $baseUrl .= rtrim($basePath, '/') . '/';
 
-            // 5. 解析HTML并修复资源路径
+            // 解析并修复资源路径
             $dom = new DOMDocument();
-            libxml_use_internal_errors(true); // 抑制解析警告
+            libxml_use_internal_errors(true);
             $dom->loadHTML($content);
             libxml_clear_errors();
 
@@ -59,8 +60,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ['tag' => 'script', 'attr' => 'src'],
                 ['tag' => 'iframe', 'attr' => 'src'],
                 ['tag' => 'form', 'attr' => 'action'],
-                ['tag' => 'img', 'attr' => 'srcset'], // 响应式图片
-                ['tag' => 'source', 'attr' => 'src'], // 多媒体资源
+                ['tag' => 'img', 'attr' => 'srcset'],
+                ['tag' => 'source', 'attr' => 'src'],
             ];
 
             foreach ($elements as $el) {
@@ -76,17 +77,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $mirrorContent = $dom->saveHTML();
         }
     }
-}
-
-// URL处理辅助类
-class Uri {
-    private $url;
-    public function __construct($url) {
-        $this->url = filter_var($url, FILTER_SANITIZE_URL);
-    }
-    public function getUrl() {
-        return $this->url;
-    }
+    $isLoading = false; // 镜像处理完成，设置为false
+} else {
+    $isLoading = false; // 页面初始加载时，设置为false
 }
 ?>
 
@@ -94,12 +87,10 @@ class Uri {
 <html>
 <head>
     <title>全能网页镜像工具</title>
-    <!-- 移动端核心适配 -->
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="theme-color" content="#1a73e8">
-
     <style>
         /* 全局样式 */
         * {
@@ -204,12 +195,12 @@ class Uri {
             .container {
                 padding: 15px;
             }
-            
+
             input[type="url"], button {
                 font-size: 14px;
                 padding: 14px;
             }
-            
+
             .mirror-wrap {
                 padding: 18px;
                 border-radius: 10px;
@@ -221,6 +212,28 @@ class Uri {
             body { background-color: #1a1a1a; color: white; }
             .form-box, .mirror-wrap { background-color: #333; border-color: #444; }
             button { background-color: #3b82f6; }
+        }
+
+        /* 加载动画样式 */
+       .loading-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+        }
+
+       .loading {
+            border: 16px solid #f3f3f3;
+            border-top: 16px solid #1a73e8;
+            border-radius: 50%;
+            width: 120px;
+            height: 120px;
+            animation: spin 2s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
 </head>
@@ -240,12 +253,18 @@ class Uri {
             <?php endif; ?>
         </div>
 
-        <?php if ($mirrorContent): ?>
-            <div class="mirror-wrap">
+        <div class="mirror-wrap">
+            <?php if ($isLoading): ?>
+                <div class="loading-container">
+                    <div class="loading"></div>
+                </div>
+            <?php elseif ($mirrorContent): ?>
                 <h2 class="mirror-title">镜像网页内容</h2>
                 <div class="mirror-content"><?= $mirrorContent ?></div>
-            </div>
-        <?php endif; ?>
+            <?php else: ?>
+                <h2 class="mirror-title">等待镜像网页...</h2>
+            <?php endif; ?>
+        </div>
     </div>
 </body>
 </html>
